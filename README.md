@@ -1,202 +1,344 @@
-# User-and-Credential-Management_T6.1
-The User and Credential Management component provides authentication, authorization for all CoEvolution Hub components. It ensures that verified users and processes can access sensitive model information, datasets, orchestration features. It manages password encryption, role assignments, and token issuance for inter-component communication.
+# CoEvolution Hub: User & Credential Management (T6.1)
 
-# User & Credential Management (UCM) — CoEvolution Hub Backend
+The **User & Credential Management (UCM)** component is the central authentication and authorization service of the **CoEvolution Hub**. It makes sure that only verified users and services can reach protected Hub resources: AI models, datasets, reports and orchestration features.
 
-The **User and Credential Management (UCM)** component of the CoEvolution Hub Backend provides **authentication, authorization, and identity management services** for all Hub components.
+UCM is built on **[Keycloak](https://www.keycloak.org/)**, an open-source Identity and Access Management (IAM) server, configured for CoEvolution. It provides:
 
-Its main objective is to ensure that **only authenticated and authorized users or services** can access protected Hub resources (models, datasets, orchestration features) using **OAuth2 / OpenID Connect (OIDC)** and **Role-Based Access Control (RBAC)**.
+- login through **OAuth 2.0 / OpenID Connect (OIDC)**;
+- **Role-Based Access Control (RBAC)**;
+- issuing of **JWT** tokens for users and for component-to-component communication.
 
----
+The component is developed in **WP6 / Task 6.1** and is described in deliverable **D6.2** as part of the Hub MVP.
 
-## 1. Purpose and Responsibilities
-
-The UCM component is responsible for:
-
-- User registration and identity management  
-- Secure credential management (hashed passwords, policies)  
-- Role and permission management (RBAC)  
-- Token issuance (JWT)  
-- Token validation and access control enforcement  
-- Audit logging for traceability and accountability  
-- Exposure of REST and OIDC-compliant endpoints over HTTPS  
+> **Part of:** CoEvolution Hub Backend (WP6 / T6.1) · **Type:** Identity & Access Management · **Based on:** Keycloak · **Maintainer:** AEGIS IT Research
 
 ---
 
-## 2. Technology Stack (as defined in the Architecture Deliverable)
+## Contents
 
-- **IAM Solution:** Keycloak  
-- **Runtime Environment:** Java 21  
-- **Database:** PostgreSQL  
-- **Interfaces:** REST APIs + OpenID Connect endpoints  
-- **Security:** OAuth2, OIDC, RBAC, TLS encryption  
-- **Deployment:** Docker-based standalone container  
-- **Persistence:** Persistent storage for users, roles, credentials  
-
-### Recommended Hardware Requirements
-
-- Minimum: 2–4 CPU cores, 8GB RAM, 20GB disk  
-- Recommended: 4+ CPU cores, 16GB RAM, 40GB disk  
-
----
-
-## 3. Architectural Role in the CoEvolution Hub
-
-The UCM acts as the **central authentication and authorization authority** of the CoEvolution Hub.
-
-### Interacting Components
-
-- **Dashboard (Frontend)**  
-  Performs login operations and uses access tokens when invoking Hub Backend APIs.
-
-- **Hub Backend Services**  
-  Validate JWTs and enforce RBAC policies.
-
-- **Orchestrator (if applicable)**  
-  May request tokens for service-to-service authentication.
-
-The UCM serves as the **security gatekeeper** of the platform.
+- [What UCM does](#what-ucm-does)
+- [Architecture](#architecture)
+- [What is CoEvolution-specific](#what-is-coevolution-specific)
+- [Quick start (Docker Compose)](#quick-start-docker-compose)
+- [Configuration](#configuration)
+- [Deployment](#deployment)
+- [Realm, clients and roles](#realm-clients-and-roles)
+- [Token model](#token-model)
+- [Integrating a Hub or partner component](#integrating-a-hub-or-partner-component)
+- [Endpoints](#endpoints)
+- [Security](#security)
+- [Verifying the deployment](#verifying-the-deployment)
+- [Troubleshooting](#troubleshooting)
+- [Project structure](#project-structure)
+- [Acknowledgements and licence](#acknowledgements-and-licence)
 
 ---
 
-## 4. Inputs and Outputs
+## What UCM does
 
-### 4.1 Inputs
+| Responsibility | How it is provided |
+| --- | --- |
+| User registration and identity management | Keycloak users in the `coevolution` realm |
+| Secure credential management | Salted password hashing and configurable password policies |
+| Role and permission management (RBAC) | Realm roles, assigned to users and service accounts |
+| Token issuance | OIDC-compliant JWT access tokens and refresh tokens |
+| Token validation and access control | Downstream services verify tokens against the UCM public keys (JWKS) |
+| Audit logging | Keycloak login and admin events |
+| Standard interfaces | OIDC endpoints and the Keycloak Admin REST API, over HTTPS |
 
-- User credentials (username/password)
-- Access requests
-- Token validation requests
+### Inputs and outputs
 
-**Format:** JSON payloads  
-**Trigger:** Login attempt or token validation request
-
----
-
-### 4.2 Outputs
-
-- JWT Access Tokens  
-- Refresh Tokens (if enabled)  
-- User role metadata (claims inside tokens)  
-- Audit log entries  
-
-These outputs are consumed by all Hub components requiring authentication.
+| | Content | Format | Trigger |
+| --- | --- | --- | --- |
+| **Inputs** | User credentials, client credentials, token validation and introspection requests | HTTP form / JSON | Login, service authentication, API call |
+| **Outputs** | JWT access tokens, refresh tokens, role claims, audit events | JWT / JSON | Successful authentication or validation |
 
 ---
 
-## 5. Authentication & Authorization Model
+## Architecture
 
-The UCM is implemented using **Keycloak** as the Identity and Access Management (IAM) solution.
+```
+                    ┌──────────────────────────────┐
+  Dashboard ───────▶│                              │
+  (Authorization    │  UCM: Keycloak               │──▶ PostgreSQL
+   Code + PKCE)     │  realm: coevolution          │    (users, roles,
+                    │                              │     credentials, sessions)
+  Hub backend  ────▶│  /realms/coevolution/...     │
+  services          │                              │
+  (Client           └──────────────┬───────────────┘
+   Credentials)                    │ JWKS (public keys)
+                                   ▼
+             Every Hub service verifies JWT signature, issuer,
+             audience and expiry, then enforces RBAC from the roles
+```
 
-### 5.1 Realm Structure (Recommended Setup)
+**Interacting components:**
 
-- **Realm:** `coevolution`
-
-### 5.2 Clients (Example Configuration)
-
-- `coevolution-dashboard`  
-  Used by the frontend application (Authorization Code Flow)
-
-- `coevolution-hub-backend`  
-  Confidential client for backend services
-
-- `coevolution-orchestrator` (optional)  
-  For service-to-service communication
-
----
-
-### 5.3 Role-Based Access Control (RBAC)
-
-Example roles:
-
-- `admin` — Full administrative privileges  
-- `developer` — Access to development and model-related features  
-- `operator` — Orchestration-related permissions  
-- `auditor` — Read-only access to logs and reports  
-- `viewer` — Dashboard read-only access  
-
-Roles are included as **claims inside JWT tokens** and enforced by downstream services.
+- **Hub Dashboard (frontend):** signs users in with the Authorization Code flow and sends the access token with every call to the Hub Backend.
+- **Orchestrator and other components:** validate JWTs and enforce RBAC on each request, obtain tokens with the Client Credentials flow to call other services.
 
 ---
 
-### 5.4 Token Strategy
+## What is CoEvolution-specific
 
-The system issues **JWT tokens** compliant with OIDC.
+UCM uses the upstream Keycloak server. The CoEvolution work in this repository is the configuration around it:
 
-Supported flows:
+| Item | Location in repo |
+| --- | --- |
+| `coevolution` realm definition: clients, roles, policies, event settings | `/realm-export.json`|
 
-- **Authorization Code Flow** (for frontend login)
-- **Client Credentials Flow** (for service-to-service authentication)
-
-Typical JWT claims:
-
-- `sub`
-- `preferred_username`
-- `realm_access.roles`
-- `aud`
-- `exp`
-- `iss`
-
-All downstream services must:
-
-1. Verify JWT signature  
-2. Validate issuer (`iss`) and audience (`aud`)  
-3. Check expiration  
-4. Enforce RBAC policies  
+The realm is **imported automatically on first start**, so a new deployment gets the full CoEvolution configuration without manual steps.
 
 ---
 
-## 6. Exposed Endpoints
-
-The UCM exposes standard **OIDC endpoints**, including:
-
-- Authorization Endpoint  
-- Token Endpoint  
-- UserInfo Endpoint  
-- JWKS Endpoint (public keys)  
-- Token Introspection Endpoint (if enabled)  
-
-Example OIDC discovery endpoint:
-
-
-All endpoints are exposed via **HTTPS (TLS-secured)** communication.
-
----
-
-## 7. Security Considerations
-
-- Passwords are stored using secure hashing algorithms  
-- TLS encryption for all communication  
-- Token-based API protection  
-- Audit logging for login attempts and access events  
-- GDPR-aligned minimal storage of personal data  
-- Role-based restriction of administrative operations  
-
-Target authentication latency: **<200ms per request** under nominal load.
-
----
-
-## 8. Deployment
-
-### 8.1 Containerization
-
-The UCM is deployed as a **standalone Docker container**.
-
-It requires:
-
-- Persistent volume for Keycloak data  
-- PostgreSQL database connection  
-- Network access from Hub components  
-
----
-
-### 8.2 Example Environment Variables (Template)
+## Quick start (Docker Compose)
 
 ```bash
-KC_DB=postgres
-KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
-KC_DB_USERNAME=keycloak
-KC_DB_PASSWORD=<secure_password>
+git clone <REPOSITORY_URL>
+cd User-and-Credential-Management_T6.1
+cp .env.example .env        # set the passwords (see Configuration)
+docker compose up -d
+```
 
-KC_HOSTNAME=ucm.coevolution.local
-KC_HTTP_ENABLED=false
-KC_HTTPS_PORT=8443
+Once the containers are running (about a minute on first start):
+
+- **Admin console:** `http://localhost:8080/admin/`. Log in with the bootstrap admin from `.env`.
+- **OIDC discovery:** `http://localhost:8080/realms/coevolution/.well-known/openid-configuration`
+
+> [!WARNING]
+> The quick start runs over HTTP for local testing only. Production deployments must use HTTPS (see [Deployment](#deployment)).
+
+### Reference `docker-compose.yaml`
+
+<!-- TODO: replace with the repository's actual compose file if it differs -->
+```yaml
+# ── Keycloak ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      nodeSelector:
+        node-role: worker
+      imagePullSecrets:
+      - name: regcred
+      containers:
+      - name: keycloak
+        image: keycloak/keycloak:26.0
+        args: ["start", "--import-realm"]
+        ports:
+        - containerPort: 8081
+        env:
+        - name: KEYCLOAK_ADMIN
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: KEYCLOAK_ADMIN
+        - name: KEYCLOAK_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: KEYCLOAK_ADMIN_PASSWORD
+        # Use the real domain so tokens have correct issuer URL
+        - name: KC_HOSTNAME
+          value: "aegis.coevolution-project.eu"
+        - name: KC_HTTP_PORT
+          value: "8081"
+        - name: KC_PROXY
+          value: "edge"               # tells Keycloak it sits behind a proxy
+        - name: KC_HOSTNAME_STRICT_BACKCHANNEL
+          value: "false"
+        volumeMounts:
+        - name: keycloak-data
+          mountPath: /opt/keycloak/data
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+      volumes:
+      - name: keycloak-data
+        persistentVolumeClaim:
+          claimName: keycloak-data-pvc
+ 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+spec:
+  type: NodePort
+  selector:
+    app: keycloak
+  ports:
+  - name: http
+    port: 8081
+    targetPort: 8081
+    nodePort: 30012     
+```
+
+---
+
+## Configuration
+
+Configuration uses standard Keycloak environment variables. The most relevant ones are listed below; see the [Keycloak configuration guide](https://www.keycloak.org/server/all-config) for the rest.
+
+| Variable | Required | Description | Example |
+| --- | --- | --- | --- |
+| `KC_DB` | Yes | Database vendor | `postgres` |
+| `KC_DB_URL` | Yes | JDBC URL of the database | `jdbc:postgresql://postgres:5432/keycloak` |
+| `KC_DB_USERNAME` / `KC_DB_PASSWORD` | Yes | Database credentials | from `.env` |
+| `KC_BOOTSTRAP_ADMIN_USERNAME` / `KC_BOOTSTRAP_ADMIN_PASSWORD` | First start | Initial admin account (Keycloak 26+; older versions use `KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD`) | from `.env` |
+| `KC_HOSTNAME` | Production | Public URL of UCM, which becomes the token issuer (`iss`) | `https://auth.example.eu` |
+| `KC_HTTP_RELATIVE_PATH` | If needed | Path prefix when UCM is not served at the root | `/auth` |
+| `KC_PROXY_HEADERS` | Behind a proxy | Trust forwarded headers from the reverse proxy | `xforwarded` |
+| `KC_HTTP_ENABLED` | Behind a proxy | Allow HTTP between proxy and Keycloak when TLS ends at the proxy | `true` |
+| `KC_HTTPS_CERTIFICATE_FILE` / `KC_HTTPS_CERTIFICATE_KEY_FILE` | Direct TLS | Certificate and key when Keycloak terminates TLS itself | `/certs/tls.crt` |
+
+**Never commit real passwords.** Keep them in `.env` locally (git-ignored) or in Kubernetes Secrets.
+
+The public URL in `KC_HOSTNAME` must match the `KEYCLOAK_URL` configured in the Hub Dashboard and the issuer expected by backend services. If they differ, token validation fails.
+
+---
+
+## Deployment
+
+### Requirements
+
+| | Minimum | Recommended |
+| --- | --- | --- |
+| CPU | 2–4 cores | 4+ cores |
+| RAM | 8 GB | 16 GB |
+| Disk | 20 GB | 40 GB |
+
+These figures, from the Hub architecture specification, cover Keycloak and PostgreSQL together. Software requirements are Docker Engine 18.06+ and Docker Compose 1.28+, or a Kubernetes cluster. Java 21 is already included in the Keycloak image.
+
+### Production checklist
+
+1. Start Keycloak with `start --import-realm`, not `start-dev`.
+2. Choose one TLS setup:
+   - **TLS at a reverse proxy or Ingress (recommended):** set `KC_PROXY_HEADERS=xforwarded` and `KC_HTTP_ENABLED=true`.
+   - **TLS in Keycloak itself:** provide the certificate files and expose port 8443.
+3. Set `KC_HOSTNAME` to the public HTTPS URL.
+4. Use a persistent volume for PostgreSQL and take regular database backups.
+5. Change the bootstrap admin password, or replace that account with a named admin user.
+6. Restrict access to `/admin/` at the proxy if it should not be public.
+
+---
+
+## Realm, clients and roles
+
+### Realm
+
+| Realm | Purpose |
+| --- | --- |
+| `coevolution` | All CoEvolution Hub users, clients and roles |
+
+### Clients
+
+| Client ID | Type | Flow | Used by |
+| --- | --- | --- | --- |
+| `coevolution-dashboard` | Public | Authorization Code + PKCE | Hub Dashboard (browser) |
+| `coevolution-hub-backend` | Confidential | Client Credentials / bearer-only validation | Hub Backend services |
+| `coevolution-orchestrator` | Confidential | Client Credentials | Orchestrator (service-to-service) |
+<!-- TODO: align client IDs with the realm export and add partner clients if any -->
+
+### Roles (RBAC)
+
+| Role | Permissions |
+| --- | --- |
+| `admin` | Full administrative privileges |
+| `developer` | Development and model-related features |
+| `enduser` | Read-only access to logs, reports, and dashboard |
+
+
+---
+
+## Token model
+
+UCM issues OIDC-compliant **JWT access tokens** and, for interactive users, **refresh tokens**.
+
+| Flow | Used for |
+| --- | --- |
+| Authorization Code + PKCE | User login from the Dashboard |
+| Client Credentials | Service-to-service calls between Hub components |
+
+
+---
+
+## Integrating a Hub or partner component
+
+To protect a component with UCM:
+
+1. **Request a client** in the `coevolution` realm from the Hub administrators. Use a confidential client for backends and a public client for browser apps.
+2. **Fetch the public keys** from the JWKS endpoint and cache them.
+3. **On every request**, validate the bearer token.
+4. **To call another component**, obtain a token with the Client Credentials flow and send it as `Authorization: Bearer <token>`.
+
+Keycloak lists maintained OIDC libraries for most stacks (Python/FastAPI, Node.js, Java, Angular), so you do not need to write token validation yourself.
+
+---
+
+## Endpoints
+
+All endpoints are relative to `https://<ucm-host>/realms/coevolution`. If `KC_HTTP_RELATIVE_PATH` is set, prefix them with that path.
+
+| Endpoint | Path |
+| --- | --- |
+| OIDC discovery | `/.well-known/openid-configuration` |
+| Authorization | `/protocol/openid-connect/auth` |
+| Token | `/protocol/openid-connect/token` |
+| UserInfo | `/protocol/openid-connect/userinfo` |
+| JWKS (public keys) | `/protocol/openid-connect/certs` |
+| Token introspection | `/protocol/openid-connect/token/introspect` |
+| Logout | `/protocol/openid-connect/logout` |
+| Admin REST API | `https://<ucm-host>/admin/realms/coevolution/...` |
+
+The discovery document lists every endpoint, so clients only need the discovery URL.
+
+---
+
+
+## Verifying the deployment
+
+**1. Discovery document.** It should return JSON with `issuer` equal to your public realm URL.
+
+```bash
+curl -s https://<ucm-host>/realms/coevolution/.well-known/openid-configuration
+```
+
+**2. Service token (Client Credentials).**
+
+```bash
+curl -s -X POST https://<ucm-host>/realms/coevolution/protocol/openid-connect/token \
+  -d grant_type=client_credentials \
+  -d client_id=<client-id> \
+  -d client_secret=<client-secret>
+```
+
+The response should contain an `access_token`. Paste it into a JWT decoder and check `iss`, `aud` and `realm_access.roles`.
+
+**3. User login.** Open the Hub Dashboard. You should be redirected to the UCM login page, then returned to the dashboard after signing in.
+
+---
+
+## Acknowledgements and licence
+
+This project has received funding from the European Union's **Horizon Europe** research and innovation programme under **Grant Agreement No. 101091996** (CoEvolution).
+
+Keycloak is licensed under the Apache License 2.0. CoEvolution-specific configuration is licensed under the terms in the [LICENSE](LICENSE) file.
+
+## Contact
+
+- Stella Markopoulou, AEGIS IT Research (<s.markopoulou@aegisresearch.eu>)
